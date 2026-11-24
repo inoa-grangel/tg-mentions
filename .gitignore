@@ -159,3 +159,5 @@ vite.config.ts.timestamp-*
 # TDLib  (https://core.telegram.org/tdlib/)
 tdlib-db/
 tdlib-files/
+
+data/
