@@ -25,7 +25,8 @@
   "dependencies": {
     "dotenv": "^18.0.10",
     "input": "^1.0.1",
-    "teleproto": "^1.234.0"
+    "prebuilt-tdlib": "^0.1008071.0",
+    "tdl": "^8.1.0"
   },
   "engines": {
     "node": ">=22.0.0"
