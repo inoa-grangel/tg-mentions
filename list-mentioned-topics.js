@@ -3,8 +3,8 @@ import dotenv from "dotenv";
 import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import input from "input";
-import { TelegramClient, Api } from "telegram";
-import { StringSession } from "telegram/sessions/index.js";
+import { TelegramClient, Api } from "teleproto";
+import { StringSession } from "teleproto/sessions";
 
 const ENV_PATH = fileURLToPath(new URL(".env", import.meta.url));
 dotenv.config({ path: ENV_PATH });
@@ -59,6 +59,7 @@ if (!apiId || !apiHash) {
 // 2. Connect and prompt for login if TG_SESSION is missing or expired
 const client = new TelegramClient(new StringSession(savedSession), apiId, apiHash, {
   connectionRetries: 5,
+  catchUp: false,
 });
 
 if (!savedSession) {
@@ -97,8 +98,8 @@ for (const dialog of forumGroups) {
 
   while (true) {
     const res = await client.invoke(
-      new Api.channels.GetForumTopics({
-        channel: group,
+      new Api.messages.GetForumTopics({
+        peer: group,
         q: "",
         offsetDate,
         offsetId,
@@ -116,7 +117,8 @@ for (const dialog of forumGroups) {
 
     if (res.topics.length < 100 || validTopics.length === 0) break;
     const last = validTopics[validTopics.length - 1];
-    offsetDate = last.date;
+    const lastMsg = res.messages?.find((m) => m.id === last.topMessage);
+    offsetDate = res.orderByCreateDate ? last.date : (lastMsg?.date ?? last.date);
     offsetId = last.topMessage;
     offsetTopic = last.id;
   }

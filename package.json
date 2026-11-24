@@ -5,7 +5,7 @@
   "keywords": [
     "telegram",
     "mtproto",
-    "gramjs",
+    "teleproto",
     "forum",
     "topics",
     "mentions",
@@ -25,7 +25,7 @@
   "dependencies": {
     "dotenv": "^18.0.10",
     "input": "^1.0.1",
-    "telegram": "^2.26.22"
+    "teleproto": "^1.234.0"
   },
   "engines": {
     "node": ">=22.0.0"
