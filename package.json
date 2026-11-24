@@ -1,0 +1,33 @@
+{
+  "name": "tg-mentions",
+  "version": "1.0.0",
+  "description": "CLI tool to list active Telegram forum topics where you have been mentioned, sorted by creation date with direct t.me links.",
+  "keywords": [
+    "telegram",
+    "mtproto",
+    "gramjs",
+    "forum",
+    "topics",
+    "mentions",
+    "cli"
+  ],
+  "license": "MIT",
+  "author": "Gabriel Rangel de Abreu",
+  "type": "module",
+  "main": "./list-mentioned-topics.js",
+  "bin": {
+    "tg-mentions": "./list-mentioned-topics.js"
+  },
+  "scripts": {
+    "link-cli": "npm link",
+    "start": "node ./list-mentioned-topics.js"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.10",
+    "input": "^1.0.1",
+    "telegram": "^2.26.22"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
