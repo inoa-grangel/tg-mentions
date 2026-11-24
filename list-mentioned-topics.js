@@ -42,8 +42,15 @@ function getMessageTopicId(msg) {
   return msg.message_thread_id || 0;
 }
 
-function getTopicId(topic) {
-  return topic.info.forum_topic_id ?? topic.info.message_thread_id;
+function getRawTopicId(topic) {
+  return (
+    topic.info.forum_topic_id ??
+    Math.floor(topic.info.message_thread_id / 1048576)
+  );
+}
+
+function terminalLink(uri, label = uri) {
+  return `\x1b]8;;${uri}\x1b\\${label}\x1b]8;;\x1b\\`;
 }
 
 // 1. Load or prompt for Telegram API credentials
@@ -132,7 +139,7 @@ for (let i = 0; i < chat_ids.length; i++) {
 
   process.stderr.write(`\r\x1b[KScanning forum: ${chat.title}...`);
 
-  // Step A: Search mentions FIRST so groups with 0 mentions are skipped instantly
+  // Search mentions first so groups with 0 mentions are skipped immediately
   const mentionRes = await client.invoke({
     _: "searchChatMessages",
     chat_id: chat.id,
@@ -145,7 +152,6 @@ for (let i = 0; i < chat_ids.length; i++) {
 
   if (!mentionRes.messages || mentionRes.messages.length === 0) continue;
 
-  // Map each mentioned topic ID to its newest mention message ID
   const latestMentionByTopic = new Map();
   for (const msg of mentionRes.messages) {
     const topicId = getMessageTopicId(msg);
@@ -156,7 +162,6 @@ for (let i = 0; i < chat_ids.length; i++) {
 
   if (latestMentionByTopic.size === 0) continue;
 
-  // Step B: Fetch metadata ONLY for the topics where you were mentioned
   const activeMentionedTopics = [];
   for (const [topicId, latestMsgId] of latestMentionByTopic) {
     try {
@@ -182,36 +187,28 @@ for (let i = 0; i < chat_ids.length; i++) {
       (a, b) => b.topic.info.creation_date - a.topic.info.creation_date
     );
 
+    const username = supergroup.usernames?.active_usernames?.[0];
+
     console.log(`\nGroup: ${chat.title}`);
     for (const { topic, latestMsgId } of activeMentionedTopics) {
       const createdDate = new Date(topic.info.creation_date * 1000)
         .toISOString()
         .split("T")[0];
+      const rawMsgId = Math.floor(latestMsgId / 1048576);
+      const rawTopicId = getRawTopicId(topic);
 
-      let link = "";
-      try {
-        const linkRes = await client.invoke({
-          _: "getMessageLink",
-          chat_id: chat.id,
-          message_id: latestMsgId,
-          media_timestamp: 0,
-          for_album: false,
-          in_message_thread: true,
-        });
-        link = linkRes.link;
-      } catch {
-        const topicId = getTopicId(topic);
-        const rawMsgId = Math.floor(latestMsgId / 1048576);
-        link =
-          topicId === 1
-            ? `https://t.me/c/${supergroup.id}/${rawMsgId}`
-            : `https://t.me/c/${supergroup.id}/${topicId}/${rawMsgId}`;
-      }
+      const tgUri = username
+        ? rawTopicId === 1
+          ? `tg://resolve?domain=${username}&post=${rawMsgId}`
+          : `tg://resolve?domain=${username}&post=${rawMsgId}&thread=${rawTopicId}`
+        : rawTopicId === 1
+          ? `tg://privatepost?channel=${supergroup.id}&post=${rawMsgId}`
+          : `tg://privatepost?channel=${supergroup.id}&post=${rawMsgId}&thread=${rawTopicId}`;
 
       console.log(
         `  - ${topic.info.name} (created: ${createdDate}, unread mentions: ${topic.unread_mention_count})`
       );
-      console.log(`    ${link}`);
+      console.log(`    ${terminalLink(tgUri)}`);
     }
   }
 }
