@@ -2,6 +2,7 @@
 import dotenv from "dotenv";
 import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs/promises";
+import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import input from "input";
 import tdl from "tdl";
@@ -153,6 +154,113 @@ function formatTimestamp(unixSeconds) {
   return `${yyyy}-${mm}-${dd} ${hh}:${min}`;
 }
 
+/**
+ * Interactive arrow-key menu to open selected topics directly without exiting.
+ */
+function runInteractiveSelector(items) {
+  if (!process.stdin.isTTY || items.length === 0) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    let cursor = 0;
+    let statusMessage = "";
+    let renderedLines = 0;
+
+    const maxVisible = Math.min(
+      items.length,
+      Math.max(5, (process.stdout.rows || 24) - 6)
+    );
+
+    readline.emitKeypressEvents(process.stdin);
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdout.write("\x1b[?25l"); // Hide cursor
+
+    const render = () => {
+      if (renderedLines > 0) {
+        process.stdout.write(`\x1b[${renderedLines}A\x1b[J`);
+      }
+
+      const half = Math.floor(maxVisible / 2);
+      let start = Math.max(0, cursor - half);
+      if (start + maxVisible > items.length) {
+        start = Math.max(0, items.length - maxVisible);
+      }
+      const end = Math.min(items.length, start + maxVisible);
+
+      const lines = [
+        "\x1b[2mUse ↑/↓ to navigate, Enter to open, q or Esc to quit:\x1b[0m",
+      ];
+
+      if (start > 0) {
+        lines.push(`  \x1b[2m↑ ${start} more above\x1b[0m`);
+      }
+
+      for (let i = start; i < end; i++) {
+        const item = items[i];
+        const selected = i === cursor;
+        const pointer = selected ? "\x1b[36m❯\x1b[0m" : " ";
+        const title = selected
+          ? `\x1b[1;36m${item.topicName}\x1b[0m`
+          : item.topicName;
+        const meta = `\x1b[2m[${item.groupTitle} • ${item.lastMsgFormatted} • unread: ${item.unreadCount}]\x1b[0m`;
+        lines.push(`${pointer} ${title} ${meta}`);
+      }
+
+      if (end < items.length) {
+        lines.push(`  \x1b[2m↓ ${items.length - end} more below\x1b[0m`);
+      }
+
+      if (statusMessage) {
+        lines.push(`\x1b[32m${statusMessage}\x1b[0m`);
+      }
+
+      const output = `${lines.join("\n")}\n`;
+      renderedLines = lines.length;
+      process.stdout.write(output);
+    };
+
+    const cleanup = () => {
+      process.stdin.removeListener("keypress", onKeypress);
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(false);
+      }
+      process.stdin.pause();
+      process.stdout.write("\x1b[?25h"); // Restore cursor
+      resolve();
+    };
+
+    const onKeypress = (_str, key) => {
+      if (!key) return;
+
+      if (key.ctrl && key.name === "c") {
+        cleanup();
+        return;
+      }
+
+      if (key.name === "up" || key.name === "k") {
+        cursor = (cursor - 1 + items.length) % items.length;
+        render();
+      } else if (key.name === "down" || key.name === "j") {
+        cursor = (cursor + 1) % items.length;
+        render();
+      } else if (key.name === "return" || key.name === "enter") {
+        const chosen = items[cursor];
+        openUri(chosen.link);
+        statusMessage = `✓ Opened: ${chosen.topicName} (${chosen.groupTitle})`;
+        render();
+      } else if (key.name === "escape" || key.name === "q") {
+        cleanup();
+      }
+    };
+
+    process.stdin.on("keypress", onKeypress);
+    console.log("");
+    render();
+  });
+}
+
 // 1. Load or prompt for Telegram API credentials
 let apiId = Number(process.env.TG_API_ID);
 let apiHash = process.env.TG_API_HASH?.trim();
@@ -291,7 +399,7 @@ for (let i = 0; i < chat_ids.length; i++) {
   if (activeMentionedTopics.length > 0) {
     process.stderr.write("\r\x1b[K");
 
-    // Sort by last message date (newest first)
+    // Sort per-group output by last message date (newest first)
     activeMentionedTopics.sort((a, b) => b.lastMessageDate - a.lastMessageDate);
 
     const username = supergroup.usernames?.active_usernames?.[0];
@@ -313,14 +421,16 @@ for (let i = 0; i < chat_ids.length; i++) {
       results.push({
         groupTitle: chat.title,
         topicName: topic.info.name,
+        lastMessageDate,
+        lastMsgFormatted,
+        unreadCount: topic.unread_mention_count,
         link,
       });
 
-      const idx = results.length;
       console.log(
-        `  [${idx}] ${topic.info.name} (last msg: ${lastMsgFormatted}, unread mentions: ${topic.unread_mention_count})`
+        `  - ${topic.info.name} (last msg: ${lastMsgFormatted}, unread mentions: ${topic.unread_mention_count})`
       );
-      console.log(`      ${terminalLink(link)}`);
+      console.log(`    ${terminalLink(link)}`);
     }
   }
 }
@@ -333,33 +443,16 @@ if (results.length === 0) {
   process.exit(0);
 }
 
-// 4. Open immediately with --open, or let the user pick a number with Enter
+// Sort the unified navigation options across all groups (newest first, oldest at the bottom)
+results.sort((a, b) => b.lastMessageDate - a.lastMessageDate);
+
+// 4. Open immediately with --open, or launch arrow-key selector
 if (process.argv.includes("--open")) {
   const first = results[0];
-  console.log(`\nOpening [1] ${first.topicName}...`);
+  console.log(`\nOpening ${first.topicName}...`);
   openUri(first.link);
 } else {
-  console.log("");
-  while (true) {
-    const answer = (
-      await input.text(`Open topic # (1-${results.length}, Enter = 1, q = quit): `)
-    ).trim();
-
-    if (answer.toLowerCase() === "q" || answer === "0") break;
-
-    const selectedIndex = answer === "" ? 1 : Number(answer);
-    if (
-      Number.isInteger(selectedIndex) &&
-      selectedIndex >= 1 &&
-      selectedIndex <= results.length
-    ) {
-      const item = results[selectedIndex - 1];
-      console.log(`Opening [${selectedIndex}] ${item.topicName}...`);
-      openUri(item.link);
-    } else {
-      console.log(`Enter a number between 1 and ${results.length}, or q to quit.`);
-    }
-  }
+  await runInteractiveSelector(results);
 }
 
 await client.close();
