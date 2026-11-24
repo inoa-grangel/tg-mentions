@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import dotenv from "dotenv";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import input from "input";
@@ -35,6 +36,95 @@ async function saveToEnv(updates) {
   await fs.writeFile(ENV_PATH, `${normalized.join("\n")}\n`, "utf8");
 }
 
+function isTelegramDesktopInstalled() {
+  if (process.argv.includes("--web")) return false;
+
+  try {
+    if (process.platform === "win32") {
+      const registryChecks = [
+        ["query", "HKEY_CLASSES_ROOT\\tg", "/v", "URL Protocol"],
+        [
+          "query",
+          "HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\tg\\UserChoice",
+        ],
+        [
+          "query",
+          "HKEY_CLASSES_ROOT\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\AppModel\\PackageRepository\\Extensions\\windows.protocol\\tg",
+        ],
+      ];
+
+      return registryChecks.some((args) => {
+        try {
+          execFileSync("reg", args, { stdio: "ignore" });
+          return true;
+        } catch {
+          return false;
+        }
+      });
+    }
+
+    if (process.platform === "darwin") {
+      const out = execFileSync(
+        "defaults",
+        ["read", "com.apple.LaunchServices/com.apple.launchservices.secure", "LSHandlers"],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }
+      );
+      return out.includes("LSHandlerURLScheme = tg;");
+    }
+
+    const handler = execFileSync("xdg-mime", ["query", "default", "x-scheme-handler/tg"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return handler.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function buildTopicLink({ useAppScheme, username, supergroupId, rawTopicId, rawMsgId }) {
+  if (useAppScheme) {
+    if (username) {
+      return rawTopicId === 1
+        ? `tg://resolve?domain=${username}&post=${rawMsgId}`
+        : `tg://resolve?domain=${username}&post=${rawMsgId}&thread=${rawTopicId}`;
+    }
+    return rawTopicId === 1
+      ? `tg://privatepost?channel=${supergroupId}&post=${rawMsgId}`
+      : `tg://privatepost?channel=${supergroupId}&post=${rawMsgId}&thread=${rawTopicId}`;
+  }
+
+  const baseUrl = username
+    ? `https://t.me/${username}`
+    : `https://t.me/c/${supergroupId}`;
+
+  return rawTopicId === 1
+    ? `${baseUrl}/${rawMsgId}`
+    : `${baseUrl}/${rawTopicId}/${rawMsgId}`;
+}
+
+function openUri(uri) {
+  let command;
+  let args;
+
+  if (process.platform === "win32") {
+    command = "rundll32.exe";
+    args = ["url.dll,FileProtocolHandler", uri];
+  } else if (process.platform === "darwin") {
+    command = "open";
+    args = [uri];
+  } else {
+    command = "xdg-open";
+    args = [uri];
+  }
+
+  const child = spawn(command, args, {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
+}
+
 function getMessageTopicId(msg) {
   if (msg.topic_id?._ === "messageTopicForum") {
     return msg.topic_id.forum_topic_id;
@@ -51,6 +141,16 @@ function getRawTopicId(topic) {
 
 function terminalLink(uri, label = uri) {
   return `\x1b]8;;${uri}\x1b\\${label}\x1b]8;;\x1b\\`;
+}
+
+function formatTimestamp(unixSeconds) {
+  const date = new Date(unixSeconds * 1000);
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  const hh = String(date.getHours()).padStart(2, "0");
+  const min = String(date.getMinutes()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd} ${hh}:${min}`;
 }
 
 // 1. Load or prompt for Telegram API credentials
@@ -104,6 +204,8 @@ await client.login({
   },
 });
 
+const useAppScheme = isTelegramDesktopInstalled();
+
 // 3. Load chat list
 process.stderr.write("Loading chats...");
 while (true) {
@@ -125,7 +227,7 @@ const { chat_ids } = await client.invoke({
   limit: 500,
 });
 
-let foundAny = false;
+const results = [];
 
 for (let i = 0; i < chat_ids.length; i++) {
   const chat = await client.invoke({ _: "getChat", chat_id: chat_ids[i] });
@@ -139,7 +241,6 @@ for (let i = 0; i < chat_ids.length; i++) {
 
   process.stderr.write(`\r\x1b[KScanning forum: ${chat.title}...`);
 
-  // Search mentions first so groups with 0 mentions are skipped immediately
   const mentionRes = await client.invoke({
     _: "searchChatMessages",
     chat_id: chat.id,
@@ -156,14 +257,14 @@ for (let i = 0; i < chat_ids.length; i++) {
   for (const msg of mentionRes.messages) {
     const topicId = getMessageTopicId(msg);
     if (topicId && !latestMentionByTopic.has(topicId)) {
-      latestMentionByTopic.set(topicId, msg.id);
+      latestMentionByTopic.set(topicId, { id: msg.id, date: msg.date });
     }
   }
 
   if (latestMentionByTopic.size === 0) continue;
 
   const activeMentionedTopics = [];
-  for (const [topicId, latestMsgId] of latestMentionByTopic) {
+  for (const [topicId, latestMention] of latestMentionByTopic) {
     try {
       const topic = await client.invoke({
         _: "getForumTopic",
@@ -171,7 +272,16 @@ for (let i = 0; i < chat_ids.length; i++) {
         forum_topic_id: topicId,
       });
       if (!topic.info.is_closed) {
-        activeMentionedTopics.push({ topic, latestMsgId });
+        const lastMessageDate =
+          topic.last_message?.date ??
+          latestMention.date ??
+          topic.info.creation_date;
+
+        activeMentionedTopics.push({
+          topic,
+          latestMsgId: latestMention.id,
+          lastMessageDate,
+        });
       }
     } catch {
       // Topic may have been deleted
@@ -179,44 +289,77 @@ for (let i = 0; i < chat_ids.length; i++) {
   }
 
   if (activeMentionedTopics.length > 0) {
-    foundAny = true;
     process.stderr.write("\r\x1b[K");
 
-    // Sort by topic creation date (newest first)
-    activeMentionedTopics.sort(
-      (a, b) => b.topic.info.creation_date - a.topic.info.creation_date
-    );
+    // Sort by last message date (newest first)
+    activeMentionedTopics.sort((a, b) => b.lastMessageDate - a.lastMessageDate);
 
     const username = supergroup.usernames?.active_usernames?.[0];
 
     console.log(`\nGroup: ${chat.title}`);
-    for (const { topic, latestMsgId } of activeMentionedTopics) {
-      const createdDate = new Date(topic.info.creation_date * 1000)
-        .toISOString()
-        .split("T")[0];
+    for (const { topic, latestMsgId, lastMessageDate } of activeMentionedTopics) {
+      const lastMsgFormatted = formatTimestamp(lastMessageDate);
       const rawMsgId = Math.floor(latestMsgId / 1048576);
       const rawTopicId = getRawTopicId(topic);
 
-      const tgUri = username
-        ? rawTopicId === 1
-          ? `tg://resolve?domain=${username}&post=${rawMsgId}`
-          : `tg://resolve?domain=${username}&post=${rawMsgId}&thread=${rawTopicId}`
-        : rawTopicId === 1
-          ? `tg://privatepost?channel=${supergroup.id}&post=${rawMsgId}`
-          : `tg://privatepost?channel=${supergroup.id}&post=${rawMsgId}&thread=${rawTopicId}`;
+      const link = buildTopicLink({
+        useAppScheme,
+        username,
+        supergroupId: supergroup.id,
+        rawTopicId,
+        rawMsgId,
+      });
 
+      results.push({
+        groupTitle: chat.title,
+        topicName: topic.info.name,
+        link,
+      });
+
+      const idx = results.length;
       console.log(
-        `  - ${topic.info.name} (created: ${createdDate}, unread mentions: ${topic.unread_mention_count})`
+        `  [${idx}] ${topic.info.name} (last msg: ${lastMsgFormatted}, unread mentions: ${topic.unread_mention_count})`
       );
-      console.log(`    ${terminalLink(tgUri)}`);
+      console.log(`      ${terminalLink(link)}`);
     }
   }
 }
 
 process.stderr.write("\r\x1b[K");
 
-if (!foundAny) {
+if (results.length === 0) {
   console.log("No mentions found in any active forum topics.");
+  await client.close();
+  process.exit(0);
+}
+
+// 4. Open immediately with --open, or let the user pick a number with Enter
+if (process.argv.includes("--open")) {
+  const first = results[0];
+  console.log(`\nOpening [1] ${first.topicName}...`);
+  openUri(first.link);
+} else {
+  console.log("");
+  while (true) {
+    const answer = (
+      await input.text(`Open topic # (1-${results.length}, Enter = 1, q = quit): `)
+    ).trim();
+
+    if (answer.toLowerCase() === "q" || answer === "0") break;
+
+    const selectedIndex = answer === "" ? 1 : Number(answer);
+    if (
+      Number.isInteger(selectedIndex) &&
+      selectedIndex >= 1 &&
+      selectedIndex <= results.length
+    ) {
+      const item = results[selectedIndex - 1];
+      console.log(`Opening [${selectedIndex}] ${item.topicName}...`);
+      openUri(item.link);
+    } else {
+      console.log(`Enter a number between 1 and ${results.length}, or q to quit.`);
+    }
+  }
 }
 
 await client.close();
