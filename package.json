@@ -14,15 +14,22 @@
   "license": "MIT",
   "author": "Gabriel Rangel de Abreu",
   "type": "module",
-  "main": "./list-mentioned-topics.js",
+  "imports": {
+    "#*": "./src/*"
+  },
+  "main": "./bin/tg-mentions.js",
   "bin": {
-    "tg-mentions": "./list-mentioned-topics.js"
+    "tg-mentions": "./bin/tg-mentions.js"
   },
   "scripts": {
+    "install:corp": "npm ci --ignore-scripts --audit",
     "link-cli": "npm link",
-    "start": "node ./list-mentioned-topics.js"
+    "select-chats": "node ./bin/tg-mentions.js --select-chats",
+    "start": "node ./bin/tg-mentions.js",
+    "verify:tdlib": "node -e \"import('node:fs').then(async fs => { const { getTdjson } = await import('prebuilt-tdlib'); const crypto = await import('node:crypto'); const p = getTdjson(); console.log(p, crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex')); })\""
   },
   "dependencies": {
+    "commander": "^15.1.0",
     "dotenv": "18.0.10",
     "prebuilt-tdlib": "0.1008071.0",
     "tdl": "8.1.0",
